@@ -5272,9 +5272,32 @@ func TestClientConnTooIdle(t *testing.T) {
 }
 
 type fakeConnErr struct {
-	net.Conn
 	writeErr error
 	closed   bool
+}
+
+func (fce *fakeConnErr) SetDeadline(t time.Time) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (fce *fakeConnErr) SetReadDeadline(t time.Time) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (fce *fakeConnErr) SetWriteDeadline(t time.Time) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (fce *fakeConnErr) LocalAddr() net.Addr {
+	return fakeAddr{}
+}
+
+func (fce *fakeConnErr) RemoteAddr() net.Addr {
+	return fakeAddr{}
+}
+
+func (fce *fakeConnErr) Read(b []byte) (n int, err error) {
+	return 0, fmt.Errorf("not implemented")
 }
 
 func (fce *fakeConnErr) Write(b []byte) (n int, err error) {
@@ -5285,6 +5308,11 @@ func (fce *fakeConnErr) Close() error {
 	fce.closed = true
 	return nil
 }
+
+func (fakeAddr) Network() string { return "fake" }
+func (fakeAddr) String() string  { return "fake" }
+
+type fakeAddr struct{}
 
 // issue 39337: close the connection on a failed write
 func TestTransportNewClientConnCloseOnWriteError(t *testing.T) {
@@ -5614,14 +5642,15 @@ func TestTransportFrameBufferReuse(t *testing.T) {
 	defer tr.CloseIdleConnections()
 
 	var wg sync.WaitGroup
-	defer wg.Wait()
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
+	const numRequests = 10
+	wg.Add(numRequests)
+	errCh := make(chan error, numRequests)
+	for i := 0; i < numRequests; i++ {
 		go func() {
 			defer wg.Done()
 			req, err := http.NewRequest("POST", st.ts.URL, strings.NewReader(filler))
 			if err != nil {
-				t.Error(err)
+				errCh <- err
 				return
 			}
 			req.Header.Set("Big", filler)
@@ -5629,7 +5658,7 @@ func TestTransportFrameBufferReuse(t *testing.T) {
 			req.Trailer.Set("Big", filler)
 			res, err := tr.RoundTrip(req)
 			if err != nil {
-				t.Error(err)
+				errCh <- err
 				return
 			}
 			if got, want := res.StatusCode, 200; got != want {
@@ -5638,9 +5667,16 @@ func TestTransportFrameBufferReuse(t *testing.T) {
 			if res != nil && res.Body != nil {
 				res.Body.Close()
 			}
+			errCh <- nil
 		}()
 	}
-
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // Ensure that a request blocking while being written to the underlying net.Conn doesn't
